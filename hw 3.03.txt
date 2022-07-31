@@ -1,0 +1,142 @@
+1.  Какой системный вызов делает команда cd? В прошлом ДЗ мы выяснили, что cd не является самостоятельной программой, это shell builtin, поэтому запустить strace непосредственно на cd не получится. Тем не менее, вы можете запустить strace на /bin/bash -c 'cd /tmp'. В этом случае вы увидите полный список системных вызовов, которые делает сам bash при старте. Вам нужно найти тот единственный, который относится именно к cd. Обратите внимание, что strace выдаёт результат своей работы в поток stderr, а не в stdout.
+
+chdir("/tmp")
+
+
+root@vagrant:~# strace /bin/bash -c 'cd /tmp'
+....
+getpeername(0, 0x7fff1e796dd0, [16])    = -1 ENOTSOCK (Socket operation on non-socket)
+rt_sigprocmask(SIG_BLOCK, NULL, [], 8)  = 0
+newfstatat(AT_FDCWD, "/tmp", {st_mode=S_IFDIR|S_ISVTX|0777, st_size=4096, ...}, 0) = 0
+chdir("/tmp")                           = 0
+rt_sigprocmask(SIG_BLOCK, [CHLD], [], 8) = 0
+rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0
+exit_group(0)                           = ?
++++ exited with 0 +++
+root@vagrant:~#
+
+
+2.  Попробуйте использовать команду file на объекты разных типов на файловой системе. Например:
+vagrant@netology1:~$ file /dev/tty
+/dev/tty: character special (5/0)
+vagrant@netology1:~$ file /dev/sda
+/dev/sda: block special (8/0)
+vagrant@netology1:~$ file /bin/bash
+/bin/bash: ELF 64-bit LSB shared object, x86-64
+Используя strace выясните, где находится база данных file на основании которой она делает свои догадки.
+
+
+Для определения типа файла file последовательно проводит ряд тестов: тест файловой системы, тест магических чисел и языковой тест.
+Первый успешный тест приводит к выводу результата.
+
+Тест файловой системы использует системный вызов stat (newfstatat для 64-битных систем), который использует inode (индексный дескриптор) для определения типа файла. Первый два примера - результат теста файловой системы.
+
+Если в результате первого теста получаем тип data, то дальше запускается тест магических чисел.
+В третьем примере этот случай:
+root@vagrant:~# file -e soft /bin/bash
+/bin/bash: data
+
+Он использует прекомпилированные файлы magic:
+root@vagrant:~# strace file /bin/bash 5>&2 2>&1 1>&5 | grep magic
+openat(AT_FDCWD, "/lib/x86_64-linux-gnu/libmagic.so.1", O_RDONLY|O_CLOEXEC) = 3
+newfstatat(AT_FDCWD, "/root/.magic.mgc", 0x7ffc526730b0, 0) = -1 ENOENT (No such file or directory)
+newfstatat(AT_FDCWD, "/root/.magic", 0x7ffc526730b0, 0) = -1 ENOENT (No such file or directory)
+openat(AT_FDCWD, "/etc/magic.mgc", O_RDONLY) = -1 ENOENT (No such file or directory)
+newfstatat(AT_FDCWD, "/etc/magic", {st_mode=S_IFREG|0644, st_size=111, ...}, 0) = 0
+openat(AT_FDCWD, "/etc/magic", O_RDONLY) = 3
+openat(AT_FDCWD, "/usr/share/misc/magic.mgc", O_RDONLY) = 3
+/bin/bash: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=33a5554034feb2af38e8c75872058883b2988bc5, for GNU/Linux 3.2.0, stripped
+root@vagrant:~#
+
+
+3.  Предположим, приложение пишет лог в текстовый файл. Этот файл оказался удален (deleted в lsof), однако возможности сигналом сказать приложению переоткрыть файлы или просто перезапустить приложение – нет. Так как приложение продолжает писать в удаленный файл, место на диске постепенно заканчивается. Основываясь на знаниях о перенаправлении потоков предложите способ обнуления открытого удаленного файла (чтобы освободить место на файловой системе).
+
+nikita@uwork-comp:~/Vagrant/ubuntu-22.04$ ps -a
+    PID TTY          TIME CMD
+  40783 pts/1    00:00:00 vi
+  40988 pts/2    00:00:00 ps
+nikita@uwork-comp:~/Vagrant/ubuntu-22.04$ lsof -p 40783
+COMMAND   PID   USER   FD   TYPE DEVICE SIZE/OFF     NODE NAME
+vi      40783 nikita    3u   REG  259,6    12288 20578325 /home/nikita/Documents/devops-netology/.1.txt.swp
+nikita@uwork-comp:~/Vagrant/ubuntu-22.04$ rm /home/nikita/Documents/devops-netology/.1.txt.swp
+nikita@uwork-comp:~/Vagrant/ubuntu-22.04$ lsof -p 40783
+COMMAND   PID   USER   FD   TYPE DEVICE SIZE/OFF     NODE NAME
+vi      40783 nikita    3u   REG  259,6    12288 20578325 /home/nikita/Documents/devops-netology/.1.txt.swp (deleted)
+nikita@uwork-comp:~/Vagrant/ubuntu-22.04$ echo '' > /proc/40783/fd/3
+nikita@uwork-comp:~/Vagrant/ubuntu-22.04$ lsof -p 40783
+COMMAND   PID   USER   FD   TYPE DEVICE SIZE/OFF     NODE NAME
+vi      40783 nikita    3u   REG  259,6        1 20578325 /home/nikita/Documents/devops-netology/.1.txt.swp (deleted)
+
+
+4.  Занимают ли зомби-процессы какие-то ресурсы в ОС (CPU, RAM, IO)?
+
+Нет. Занимают только запись в таблице процессов.
+
+5.  В iovisor BCC есть утилита opensnoop:
+root@vagrant:~# dpkg -L bpfcc-tools | grep sbin/opensnoop
+/usr/sbin/opensnoop-bpfcc
+На какие файлы вы увидели вызовы группы open за первую секунду работы утилиты? Воспользуйтесь пакетом bpfcc-tools для Ubuntu 20.04. Дополнительные сведения по установке.
+
+PID    COMM               FD ERR PATH
+766    vminfo              4   0 /var/run/utmp
+595    dbus-daemon        -1   2 /usr/local/share/dbus-1/system-services
+595    dbus-daemon        20   0 /usr/share/dbus-1/system-services
+595    dbus-daemon        -1   2 /lib/dbus-1/system-services
+595    dbus-daemon        20   0 /var/lib/snapd/dbus-1/system-services/
+386    systemd-udevd      14   0 /sys/fs/cgroup/system.slice/systemd-udevd.service/cgroup.procs
+386    systemd-udevd      14   0 /sys/fs/cgroup/system.slice/systemd-udevd.service/cgroup.threads
+601    irqbalance          6   0 /proc/interrupts
+601    irqbalance          6   0 /proc/stat
+601    irqbalance          6   0 /proc/irq/20/smp_affinity
+601    irqbalance          6   0 /proc/irq/0/smp_affinity
+601    irqbalance          6   0 /proc/irq/1/smp_affinity
+601    irqbalance          6   0 /proc/irq/8/smp_affinity
+
+6.  Какой системный вызов использует uname -a? Приведите цитату из man по этому системному вызову, где описывается альтернативное местоположение в /proc, где можно узнать версию ядра и релиз ОС.
+
+uname(2)
+
+Part of the utsname information is also accessible via /proc/sys/kernel/{ostype, hostname, osrelease, ver‐
+       sion, domainname}.
+
+nikita@uwork-comp:~/Vagrant/ubuntu-22.04$ cat /proc/sys/kernel/osrelease
+5.15.0-41-generic
+nikita@uwork-comp:~/Vagrant/ubuntu-22.04$ cat /proc/sys/kernel/ostype
+Linux
+nikita@uwork-comp:~/Vagrant/ubuntu-22.04$ cat /proc/sys/kernel/version
+#44-Ubuntu SMP Wed Jun 22 14:20:53 UTC 2022
+nikita@uwork-comp:~/Vagrant/ubuntu-22.04$ uname -a
+Linux uwork-comp 5.15.0-41-generic #44-Ubuntu SMP Wed Jun 22 14:20:53 UTC 2022 x86_64 x86_64 x86_64 GNU/Linux
+nikita@uwork-comp:~/Vagrant/ubuntu-22.04$
+
+
+7.  Чем отличается последовательность команд через ; и через && в bash? Например:
+root@netology1:~# test -d /tmp/some_dir; echo Hi
+Hi
+root@netology1:~# test -d /tmp/some_dir && echo Hi
+root@netology1:~#
+Есть ли смысл использовать в bash &&, если применить set -e?
+
+Оператор ; используется если нужно в одной строке указать несколько последовательных команд. Команда, следующая за ;
+выполнится после завершения предыдущей.
+
+При использовании опретора && команда, следующая за ним выполнится только в случае успешного завершения предыдущей (код 0)
+
+set -e устанавливает немедленный выход, если выходное состояние команды ненулевое
+
+Использовать && совместно с set -e бессмысленно
+
+8.  Из каких опций состоит режим bash set -euxo pipefail и почему его хорошо было бы использовать в сценариях?
+
+set -e устанавливает немедленный выход, если выходное состояние команды ненулевое
+set -u устанавливает проверку инициализации переменных. Если какая-то переменная не определена - скрипт немедленно завершается
+set -x использутся для отладки. bash начинает печатать в stdout все команды перед их выполнением
+set -o pipefail включает проверку что все команды в пайпе выполнились успешно. Параметр -e проверяет только код ошибки последней команды в пайпе
+
+Это все поможет избежать ошибок в скриптах (отсутсвие или ошибки в именах переменных) или вовремя прервать работу скрипта,
+видеть какая именно команда исполняется.
+
+9.  Используя -o stat для ps, определите, какой наиболее часто встречающийся статус у процессов в системе. В man ps ознакомьтесь (/PROCESS STATE CODES) что значат дополнительные к основной заглавной буквы статуса процессов. Его можно не учитывать при расчете (считать S, Ss или Ssl равнозначными).
+
+Наиболее часто встречающийся статус - S
+Дополнительные коды обозначают приоритет, многопоточность и пр.
